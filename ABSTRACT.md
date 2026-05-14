@@ -1,0 +1,31 @@
+# Heart Beat Click: A Full-Duplex Screencast-to-Action Model for Computer-Use Agents
+
+**Working abstract — v1, 2026-05-14** (revised after adversarial novelty audit; see NOVELTY.md).
+
+Current computer-use agents are half-duplex: they capture a screenshot, reason, emit a discrete tool call, wait for execution, then capture the next screenshot. Each cycle costs 1–5 seconds, blinds the model to mid-frame UI dynamics — animations, drag trails, scroll inertia, video timing, modal latency, autocomplete debounce — and reduces the rich, continuous nature of cursor and keyboard control to a sequence of `click(x, y)` and `type(s)` calls. As OSWorld saturates (Claude Sonnet 4.6: 72.5%; human: 70–75%), the remaining error mass is concentrated precisely in tasks where the observation stream itself, not the planner, is the bottleneck. We propose **Heart Beat Click (HBC)**, the GUI analogue of the full-duplex micro-tick architectures established on the speech side by Kyutai's Moshi and Thinking Machines' TML-Interaction-Small: a single autoregressive backbone that consumes a streaming screencast and emits a streaming action trajectory on a fixed 100 ms tick.
+
+We do not claim that joint world-model + policy training is itself novel — recent robotics work (π0, WorldVLA, DreamVLA, OpenVLA-OFT) and game-agent work (Dreamer 4, which obtains diamonds in Minecraft purely offline at 100× the data efficiency of VPT using a flow-matched world model) have established this paradigm. Nor is the duplex micro-tick loop itself novel — Moshi (RQ-Transformer with parallel user/system streams and an inner-monologue text channel), NVIDIA PersonaPlex, and TML-Interaction-Small (encoder-free early fusion, 200 ms interleaved input/output, dual foreground/background model) have demonstrated it on speech and live audio-video chat. Our novelty is in **the intersection, applied to pixel-level GUI control**: the first joint AR world-and-policy model with a Moshi-class duplex micro-tick loop targeting screencast frames and a continuous cursor trajectory, integrated with TML-style foreground/background dispatch so a 7–14B tick-budget foreground retains motor latency while a frontier-class background reasoner asynchronously injects plan tokens into a dedicated channel.
+
+Concretely, HBC consists of (i) encoder-free early fusion with hMLP-style screen patches, dMel audio, and learned event-token embeddings, after TML; (ii) an RQ-Transformer backbone with a large temporal trunk over interleaved {screen, cursor, event, monologue, dispatch} codebooks and a small per-tick depth trunk over channels, after Moshi; (iii) a Dreamer-4-style **shortcut-forcing flow-matched** prediction head that jointly produces the next screen-patch chunk *and* the next 50 Hz continuous cursor trajectory in one pass, with FAST-DCT compression on cursor data; (iv) discrete-AR event and monologue heads providing keyboard, scroll, hotkey, and silent chain-of-thought tokens in parallel; and (v) a non-blocking dispatch protocol to a background reasoner whose plan-token stream the foreground reads on subsequent ticks. To address near-saturation on OSWorld, we introduce **HBC-Bench**, 200 tasks across nine families (signature drawing, drag-with-autoscroll, slider live-preview, video scrub, map pan/zoom, reaction-timed UI, game-like minigames, multi-window streaming, voice+GUI fusion) where success is structurally infeasible for screenshot-loop agents at any tick rate slower than ~300 ms.
+
+We hypothesize: (H1) on HBC-Bench, half-duplex SOTA (Claude Sonnet 4.6, Fara-7B, Operator) scores below 15% regardless of base-model scale, while a 7B HBC foreground exceeds 50%; (H2) a unified joint world-and-policy network matches a separate world-model + agent stack (WebWorld + Operator) on web-task lookahead at parity FLOPs, since gradient sharing makes the latent forward model better aligned with the policy than any external world model can be; (H3) TML-style dispatch yields >10× lower wall-clock per OSWorld task at parity success rate, decoupling motor latency from reasoning depth; (H4) flow-matched continuous cursor outperforms discrete `click(x,y)` and `drag(x1,y1,x2,y2)` primitives on trajectory-bound tasks (signature, slider, sketch) by a wide margin (≥30 pp absolute); and (H5) Dreamer-4-style dream rollouts inside the model, gated by a real-browser executor, reach Fara-7B level on WebVoyager with under 10% of its trajectory data. We outline a four-stage training recipe: self-supervised screencast world modelling on public screencast video (action labels recovered by inverse dynamics); duplex SFT on logged trajectories from real users and Fara/CUA logs; in-model dream RL with executor-verified advantage; duplex RLHF with mid-action barge-in. If the hypotheses hold, Heart Beat Click is the architectural lever that takes computer-use agents past the screenshot-loop ceiling now visible on OSWorld, and the open-source-friendly stack — 7B foreground, FAST-DCT cursor encoding, public screencast pretraining — makes the recipe reproducible outside frontier labs.
+
+---
+
+## Caveman-mode TL;DR
+
+**Hypothesis.** Half-duplex screenshot loop is the ceiling on OSWorld (Sonnet 4.6 = 72.5%, near human). Remaining error = animation / drag / timing / live-preview / video. Need duplex.
+
+**Architecture.** One AR backbone. 100 ms tick. Streams: screencast patches in; cursor (continuous flow-matched), key/scroll events (discrete), silent monologue (discrete), dispatch tokens (discrete) out. RQ-Transformer (large temporal + small depth). Encoder-free early fusion. Joint loss: next-frame + next-action. Foreground 7–14B. Background reasoner async via dispatch channel. Inference: streaming KV-cache session.
+
+**Honest novelty.** Ingredients exist:
+- Duplex micro-tick → Moshi / TML / PersonaPlex (speech only).
+- Joint world+action → Dreamer 4 (games), WorldVLA / DreamVLA / π0 (robotics).
+- Flow-matched action head → π0 (robotics).
+- GUI world model → WebWorld / WebSynthesis (separate from policy, half-duplex).
+
+Intersection is empty. HBC is the first union of all four for GUI.
+
+**Benchmark.** OSWorld near-saturated; we propose **HBC-Bench** (200 tasks, 9 families) covering tasks half-duplex models cannot solve at any scale.
+
+**Hypotheses.** H1–H5 above.
