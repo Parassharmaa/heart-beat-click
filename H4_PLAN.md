@@ -11,13 +11,18 @@ Date: 2026-05-16. Selected hypothesis from ABSTRACT.md / EXECUTIVE_SUMMARY.md. C
 - **Falsification:** gap < 10 pp → H4 dead; action head is not the trajectory bottleneck.
 - **Ambiguity zone:** 10–30 pp → H4 weakly supported; reframe as H4' "head matters but other factors dominate". Inspect: is the rest of the loop (perception, planner) the bottleneck?
 
-## Backbone choices
+## Fine-tune stack
 
-Use Thinking Machines' **Tinker API** as the primary fine-tune platform (GA since 2026; managed distributed training, LoRA, token-based pricing). Tinker's supported model list includes the latest Qwen-VL multimodal MoEs (verified at https://thinkingmachines.ai/tinker/). Tinker constraints to respect: **LoRA-only**, custom loss is plausible (via raw `forward_backward` / `optim_step` primitives in the Cookbook) but unconfirmed in docs — verify in W1.
+**Self-managed fine-tune via Hugging Face Transformers + PEFT (LoRA)**, no managed platform. Reasons: custom flow-matching head needs raw PyTorch control over forward, loss, and head registration; LoRA-only managed platforms cannot host an attached non-LoRA head; cheaper at our scale.
 
-**Primary backbone:** **Qwen3.5-4B** (Apache-2.0, multimodal — image/video/text, agent-tuned with native tool calling and thinking mode, 262k native context extensible to 1M via YaRN, hybrid Gated DeltaNet + Sparse-MoE architecture). Confirmed on Tinker's price sheet at $0.22/M prefill, $0.67/M train. Smallest viable size; clean isolation of the cursor head; long context handles entire screencast sessions in one window without sliding-window complexity. https://huggingface.co/Qwen/Qwen3.5-4B
+- Training framework: `transformers` + `peft` + `accelerate` + `trl.SFTTrainer` (or hand-rolled trainer for the F variant).
+- Quantization for memory: `bitsandbytes` 4-bit / 8-bit on the backbone; flow head trained in bf16.
+- Data pipeline: `datasets` streaming, on-disk Arrow/Parquet for the cursor-trace JSONL.
+- GPUs: rented H100 80GB on **Lambda** (~$2.50/hr), **RunPod** (~$2.00/hr), or **Modal** (~$4/hr but pay-per-second, slick dev loop). Pick by W1.
 
-**Scaling-check backbone:** **Qwen3-VL-30B-A3B-Instruct** (MoE, 3B active, FP8). Tests whether head effect survives at MoE scale and at a stronger VL-specialized backbone. Single seed only.
+**Primary backbone:** **Qwen3.5-4B** (Apache-2.0, multimodal — image/video/text, agent-tuned with native tool calling and thinking mode, 262k native context extensible to 1M via YaRN, hybrid Gated DeltaNet + Sparse-MoE architecture). https://huggingface.co/Qwen/Qwen3.5-4B
+
+**Scaling-check backbone:** **Qwen3-VL-30B-A3B-Instruct** (MoE, 3B active, FP8). Tests whether head effect survives at MoE scale. Single seed.
 
 **Out of scope for H4 v0:** Qwen3-VL-235B-A22B (overkill, defer to v1).
 
@@ -37,9 +42,27 @@ Both heads consume the same backbone hidden state. Both trained on the same traj
 - Trained with flow-matching loss against ground-truth contractor cursor trace. FAST-DCT compression as an alternative encoding to ablate.
 - Inference: emit the 1 s chunk, execute it on the OS while the next forward pass kicks off (RTC-style real-time chunking).
 
+### Streaming input regime (applies to both variants)
+
+Both heads are trained with the model consuming inputs as a **causal stream**, not as single-turn screenshot prompts. Each training trajectory is one long sequence:
+
+```
+[task_desc] [tick_0_screen_patches | cursor_state] [tick_0_action_target]
+            [tick_1_screen_patches | cursor_state] [tick_1_action_target]
+            ...
+            [tick_N_screen_patches | cursor_state] [tick_N_action_target]
+```
+
+- Screen patches re-encoded incrementally per tick; backbone KV is reused across ticks within a trajectory (streaming session).
+- Loss masked to action targets only (action tokens for D, flow-matching loss for F); screen tokens are conditioning context.
+- Tick interval at train time matches inference (100 ms). Demos resampled from raw 60Hz cursor + 30FPS screen to 10Hz tick.
+- This forbids the half-duplex shortcut of "one screenshot per task" — both variants must integrate evidence across ticks.
+- Implementation: pack each trajectory into one HF `datasets` example with per-position attention mask + per-position loss mask; train with `packing=False` (one trajectory per sequence) to keep KV streams clean.
+
 ### Held constant
 - Backbone weights (init from the same checkpoint).
 - Optimizer, LR schedule, total training tokens, total wall-clock.
+- Streaming regime (tick-aligned, causal KV reuse).
 - Training data (same contractor + synthetic mix).
 - Evaluation protocol (same 50 Motor-Bench tasks, same verifiers).
 
@@ -69,20 +92,24 @@ Tasks generated procedurally where possible (50k random signatures, 50k slider t
 
 **License**: contractor data CC-BY-NC for v0; synthetic released CC-BY. Public release of Motor-Bench separate from training data.
 
-## Compute budget (Tinker token-priced)
+## Compute budget (self-managed HF / rented H100s)
 
 Stage 1 SFT only (no S0 pretrain, no S2 dream-RL — out of scope for H4).
 
 Token volume per SFT run, from contractor data: ~4,800 demos × ~10 s × 10 ticks/s × ~280 tokens/tick ≈ **400 M tokens per epoch**; 3 epochs ≈ 1.2 B training tokens per run.
 
-- **Qwen3.5-4B SFT** × 2 heads × 3 seeds = 6 runs × ~1.2 B tok × $0.67/M ≈ **$4.8k** (primary).
-- **Qwen3-VL-30B-A3B SFT** × 2 heads × 1 seed = 2 runs × ~1.2 B tok × $0.40/M ≈ **$1k** (scaling check).
-- Eval (Tinker sample API): 50 tasks × 6 models × 3 seeds ≈ negligible (a few $).
-- HF fallback (UI-TARS reference + custom-head smoke tests + Tinker compatibility): ~$1k on Lambda / RunPod H100 nodes.
+H100-hour estimates (Qwen3.5-4B LoRA SFT at bf16, batch ~64k tokens, MFU 0.3):
+- 1.2 B tok / (40 K tok/sec sustained on 1× H100) ≈ 8.3 H100-hours per run.
 
-**Total v0 H4 budget:** ~$7k all-in. Single-developer four-week sprint.
+- **Qwen3.5-4B SFT** × 2 heads × 3 seeds = 6 runs × ~8 H100-hr × $2.50/hr (Lambda) ≈ **$120**.
+- **Qwen3-VL-30B-A3B SFT** × 2 heads × 1 seed = 2 runs × ~40 H100-hr × $2.50/hr ≈ **$200** (scaling check).
+- Data pipeline / smoke tests / failed runs buffer: ~$200.
+- Eval throughput (50 tasks × 8 models × 3 seeds × real-browser executor): ~$300 (browser VMs > GPU here).
+- Contractor demos: 2 contractors × 80 hr × $50/hr ≈ **$8k** (dominant line item).
 
-If Tinker does not support custom heads (verified W1 via cookbook + `forward_backward` primitive probe), path moves entirely to HF Transformers + Unsloth on rented H100s; budget shifts to GPU-hours: ~400 H100-hours ≈ $1.2k, but loses Tinker's managed-cluster speedup and LoRA infra.
+**Total v0 H4 budget:** ~$8.8k. Contractor labor is the bulk; raw GPU compute is <$1k.
+
+Alt path with more GPU + less data: use VideoAgentTrek's pseudo-labeled corpus + procedural synthetic demos instead of contractors → drop labor cost to near-zero, GPU cost stays ~$1k, total ~$1.5k. Trade-off: noisier action labels. Decide W1 after pilot smoke test.
 
 ## Four-week timeline
 
