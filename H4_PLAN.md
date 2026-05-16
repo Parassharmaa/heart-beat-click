@@ -15,11 +15,11 @@ Date: 2026-05-16. Selected hypothesis from ABSTRACT.md / EXECUTIVE_SUMMARY.md. C
 
 Use Thinking Machines' **Tinker API** as the primary fine-tune platform (GA since 2026; managed distributed training, LoRA, token-based pricing). Tinker's supported model list includes the latest Qwen-VL multimodal MoEs (verified at https://thinkingmachines.ai/tinker/). Tinker constraints to respect: **LoRA-only**, custom loss is plausible (via raw `forward_backward` / `optim_step` primitives in the Cookbook) but unconfirmed in docs — verify in W1.
 
-**Primary backbone:** **Qwen3-VL-8B-Instruct** (dense, multimodal, Oct 2025 release; FP8 + GGUF available). Qwen3-VL's smallest agent-tuned VLM, specifically designed for screenshot + agent interaction. Smallest viable size = cleanest isolation of the action head as the experimental variable. Likely on Tinker (within the "13 additional 4B–397B variants" listed) — verify model id in W1; else fall back to HF Transformers / Unsloth for parity. Expect ≈ $0.25–$0.35 / M training tokens on Tinker.
+**Primary backbone:** **Qwen3.5-4B** (Apache-2.0, multimodal — image/video/text, agent-tuned with native tool calling and thinking mode, 262k native context extensible to 1M via YaRN, hybrid Gated DeltaNet + Sparse-MoE architecture). Confirmed on Tinker's price sheet at $0.22/M prefill, $0.67/M train. Smallest viable size; clean isolation of the cursor head; long context handles entire screencast sessions in one window without sliding-window complexity. https://huggingface.co/Qwen/Qwen3.5-4B
 
-**Scaling-check backbone:** **Qwen3-VL-30B-A3B-Instruct** (MoE, 3B active, FP8 official). Tinker-native. Tests whether the head effect survives at MoE scale. Single seed only at this size; primary results carry the 8B-dense story.
+**Scaling-check backbone:** **Qwen3-VL-30B-A3B-Instruct** (MoE, 3B active, FP8). Tests whether head effect survives at MoE scale and at a stronger VL-specialized backbone. Single seed only.
 
-**Out of scope for H4 v0:** Qwen3-VL-235B-A22B (overkill, $8k/run, defer to v1 paper).
+**Out of scope for H4 v0:** Qwen3-VL-235B-A22B (overkill, defer to v1).
 
 **External reference baselines (no fine-tune, eval only):** UI-TARS-7B and UI-TARS-72B (Alibaba, purpose-built GUI VLA, run via HF Transformers outside Tinker since not on Tinker's model list), Microsoft Fara-7B (Qwen2.5-VL-7B-derived, public HF weights), Claude Sonnet 4.6 with computer-use tool, OpenAI Operator. Run as-is on Motor-Bench; report scores for context only — they do not gate any H4 conclusion since they confound architecture and training data.
 
@@ -71,16 +71,18 @@ Tasks generated procedurally where possible (50k random signatures, 50k slider t
 
 ## Compute budget (Tinker token-priced)
 
-Stage 1 SFT only (no S0 pretrain, no S2 dream-RL — out of scope for H4). Token volume per SFT run estimated from contractor data: ~4,800 demos × ~10 s × 10 ticks/s × ~280 tokens/tick ≈ 1.3 B tokens per epoch; 3 epochs ≈ 4 B training tokens.
+Stage 1 SFT only (no S0 pretrain, no S2 dream-RL — out of scope for H4).
 
-- **Qwen3-VL-8B SFT** × 2 heads × 3 seeds = 6 runs × ~4 B tok × ~$0.30/M ≈ **$7k** (primary).
-- **Qwen3-VL-30B-A3B SFT** × 2 heads × 1 seed = 2 runs × ~4 B tok × $0.40/M ≈ **$3k** (scaling check).
-- Eval (Tinker sample API): 50 tasks × 6 models × 3 seeds × ~10 s each ≈ negligible.
-- HF fallback (UI-TARS reference + custom-head smoke tests + Tinker compatibility tests): ~$1k on Lambda / RunPod single H100 nodes.
+Token volume per SFT run, from contractor data: ~4,800 demos × ~10 s × 10 ticks/s × ~280 tokens/tick ≈ **400 M tokens per epoch**; 3 epochs ≈ 1.2 B training tokens per run.
 
-**Total v0 H4 budget:** ~$11k all-in. Single-developer four-week sprint.
+- **Qwen3.5-4B SFT** × 2 heads × 3 seeds = 6 runs × ~1.2 B tok × $0.67/M ≈ **$4.8k** (primary).
+- **Qwen3-VL-30B-A3B SFT** × 2 heads × 1 seed = 2 runs × ~1.2 B tok × $0.40/M ≈ **$1k** (scaling check).
+- Eval (Tinker sample API): 50 tasks × 6 models × 3 seeds ≈ negligible (a few $).
+- HF fallback (UI-TARS reference + custom-head smoke tests + Tinker compatibility): ~$1k on Lambda / RunPod H100 nodes.
 
-If Tinker does not support custom heads (verified W1), full path moves to HF Transformers + Unsloth on rented H100s; budget shifts to GPU-hours: ~400 H100-hours ≈ $1.2k, but loses Tinker's managed-cluster speedup.
+**Total v0 H4 budget:** ~$7k all-in. Single-developer four-week sprint.
+
+If Tinker does not support custom heads (verified W1 via cookbook + `forward_backward` primitive probe), path moves entirely to HF Transformers + Unsloth on rented H100s; budget shifts to GPU-hours: ~400 H100-hours ≈ $1.2k, but loses Tinker's managed-cluster speedup and LoRA infra.
 
 ## Four-week timeline
 
